@@ -18,6 +18,7 @@ import numpy as np
 from collections import Counter, defaultdict
 import time
 from itertools import combinations
+import re
 
 # Importar módulos locales
 import config
@@ -47,7 +48,14 @@ from utils.metrics import (
     calculate_impact_factor,
     calculate_i10_index,
     get_citation_percentiles,
-    get_top_h_relevant_articles
+    get_top_h_relevant_articles,
+    calculate_g_index,
+    calculate_e_index,
+    calculate_m_index,
+    calculate_collaboration_coefficient,
+    calculate_international_collaboration_index,
+    calculate_price_index,
+    calculate_author_h_index
 )
 
 # --------------------------
@@ -92,6 +100,10 @@ doctype_col = columns_info['doctype_col']
 citations_col = columns_info['citations_col']
 language_col = columns_info['language_col']
 funding_col = columns_info['funding_col']
+abstract_col = columns_info['abstract_col']
+publisher_col = columns_info['publisher_col']
+conference_col = columns_info['conference_col']
+oa_col = columns_info['oa_col']
 
 with st.expander("Columnas detectadas en el CSV"):
     st.write({
@@ -103,7 +115,11 @@ with st.expander("Columnas detectadas en el CSV"):
         "Tipo documento": doctype_col,
         "Citaciones": citations_col,
         "Idioma": language_col,
-        "Financiamiento": funding_col
+        "Financiamiento": funding_col,
+        "Abstract": abstract_col,
+        "Publisher": publisher_col,
+        "Conferencia": conference_col,
+        "Open Access": oa_col
     })
     st.dataframe(df.head(5))
 
@@ -324,10 +340,55 @@ with tab2:
         )
         st.plotly_chart(fig, width='stretch')
         
-        # Índice H simplificado (si hay citaciones)
-        if citations_col:
-            st.subheader("Análisis de Impacto")
-            st.info("Calculando métricas de impacto basadas en citaciones...")
+        # H-index individual por autor
+        if citations_col and author_col:
+            st.markdown("---")
+            st.subheader("H-index Individual por Autor (Top 20)")
+            
+            # Calcular H-index para cada autor
+            top_authors_list = [author for author, _ in counter_authors.most_common(20)]
+            authors_h_index = []
+            
+            for author in top_authors_list:
+                h_idx = calculate_author_h_index(author, df_filtered, citations_col, author_col)
+                pub_count = counter_authors[author]
+                authors_h_index.append({
+                    'Autor': author,
+                    'Publicaciones': pub_count,
+                    'H-index': h_idx
+                })
+            
+            if authors_h_index:
+                df_authors_h = pd.DataFrame(authors_h_index)
+                df_authors_h = df_authors_h.sort_values('H-index', ascending=False)
+                
+                # Tabla comparativa
+                st.dataframe(df_authors_h, use_container_width=True)
+                
+                # Gráfico H-index vs publicaciones (dispersión)
+                fig_h_scatter = go.Figure()
+                fig_h_scatter.add_trace(go.Scatter(
+                    x=df_authors_h['Publicaciones'],
+                    y=df_authors_h['H-index'],
+                    mode='markers+text',
+                    text=df_authors_h['Autor'].str[:30],
+                    textposition='top center',
+                    marker=dict(
+                        size=10,
+                        color=df_authors_h['H-index'],
+                        colorscale='Viridis',
+                        showscale=True,
+                        colorbar=dict(title="H-index")
+                    ),
+                    hovertemplate='<b>%{text}</b><br>Publicaciones: %{x}<br>H-index: %{y}<extra></extra>'
+                ))
+                fig_h_scatter.update_layout(
+                    title='H-index vs Publicaciones (Top 20 Autores)',
+                    xaxis_title='Número de Publicaciones',
+                    yaxis_title='H-index',
+                    height=500
+                )
+                st.plotly_chart(fig_h_scatter, width='stretch')
         
         with st.expander("Ver tabla completa de autores"):
             df_authors = pd.DataFrame(counter_authors.most_common(50), columns=['Autor', 'Publicaciones'])
@@ -628,6 +689,78 @@ with tab7:
         col1.metric("Total Fuentes", len(counter_sources))
         col2.metric("Top 10 concentra", f"{concentration:.1f}%")
         col3.metric("Fuentes únicas", len([k for k,v in counter_sources.items() if v == 1]))
+    
+    # Análisis de editores (Publishers)
+    if publisher_col:
+        st.markdown("---")
+        st.subheader("Análisis de Editores (Publishers)")
+        
+        all_publishers = []
+        for val in df_filtered[publisher_col].dropna():
+            publisher = str(val).strip()
+            if publisher and publisher.lower() != 'nan':
+                all_publishers.append(publisher)
+        
+        if all_publishers:
+            counter_publishers = Counter(all_publishers)
+            top_publishers = pd.Series(dict(counter_publishers)).sort_values(ascending=False).head(10)
+            
+            fig_publishers = go.Figure(go.Bar(
+                x=top_publishers.values[::-1],
+                y=[(pub[:60] + "..." if len(pub)>60 else pub) for pub in top_publishers.index[::-1]],
+                orientation='h',
+                marker_color='darkcyan',
+                hovertemplate='<b>%{y}</b><br>Publicaciones: %{x}<extra></extra>'
+            ))
+            fig_publishers.update_layout(
+                title='Top 10 Editores por Publicaciones',
+                xaxis_title='Publicaciones',
+                yaxis_title='Editor',
+                height=500,
+                yaxis={'categoryorder': 'total ascending'},
+                margin=dict(l=300, r=20, t=50, b=50)
+            )
+            st.plotly_chart(fig_publishers, width='stretch')
+            
+            with st.expander("Ver tabla completa de editores"):
+                df_publishers = pd.DataFrame(counter_publishers.most_common(50), columns=['Editor', 'Publicaciones'])
+                st.dataframe(df_publishers, use_container_width=True)
+    
+    # Análisis de conferencias
+    if conference_col:
+        st.markdown("---")
+        st.subheader("Análisis de Conferencias")
+        
+        all_conferences = []
+        for val in df_filtered[conference_col].dropna():
+            conference = str(val).strip()
+            if conference and conference.lower() != 'nan':
+                all_conferences.append(conference)
+        
+        if all_conferences:
+            counter_conferences = Counter(all_conferences)
+            top_conferences = pd.Series(dict(counter_conferences)).sort_values(ascending=False).head(10)
+            
+            fig_conferences = go.Figure(go.Bar(
+                x=top_conferences.values[::-1],
+                y=[(conf[:60] + "..." if len(conf)>60 else conf) for conf in top_conferences.index[::-1]],
+                orientation='h',
+                marker_color='crimson',
+                hovertemplate='<b>%{y}</b><br>Publicaciones: %{x}<extra></extra>'
+            ))
+            fig_conferences.update_layout(
+                title='Top 10 Conferencias',
+                xaxis_title='Frecuencia de Publicaciones',
+                yaxis_title='Conferencia',
+                height=500,
+                yaxis={'categoryorder': 'total ascending'},
+                margin=dict(l=300, r=20, t=50, b=50)
+            )
+            st.plotly_chart(fig_conferences, width='stretch')
+            
+            with st.expander("Ver tabla completa de conferencias"):
+                df_conferences = pd.DataFrame(counter_conferences.most_common(50), columns=['Conferencia', 'Frecuencia'])
+                st.dataframe(df_conferences, use_container_width=True)
 
 # TAB 8: Co-ocurrencia
 with tab8:
@@ -740,19 +873,94 @@ with tab9:
             col3.metric("Percentil 75", f"{percentiles['p75']:.0f}")
             col4.metric("Percentil 90", f"{percentiles['p90']:.0f}")
             
+            # Métricas avanzadas de impacto (G-index, E-index, M-index)
+            st.markdown("---")
+            st.subheader("Métricas de Impacto Avanzadas")
+            
+            g_index = calculate_g_index(citations_data)
+            e_index = calculate_e_index(citations_data, h_index)
+            m_index = calculate_m_index(h_index, year_col, df_filtered)
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Índice G", f"{g_index:.0f}", 
+                       help="Mayor número g tal que los g artículos más citados tienen al menos g² citaciones en total")
+            col2.metric("Índice E", f"{e_index:.2f}",
+                       help="Exceso de citaciones sobre el H-index: √(suma citaciones core H - h²)")
+            col3.metric("Índice M", f"{m_index:.3f}",
+                       help="H-index normalizado por años de actividad: H / años de carrera")
+            
+            # Comparativa visual de índices
+            st.markdown("#### Comparativa Visual de Índices")
+            indices_df = pd.DataFrame({
+                'Índice': ['H', 'G', 'E', 'M'],
+                'Valor': [h_index, g_index, e_index, m_index * 10]  # Multiplicar M por 10 para mejor visualización
+            })
+            
+            fig_indices = go.Figure()
+            fig_indices.add_trace(go.Bar(
+                x=indices_df['Índice'],
+                y=indices_df['Valor'],
+                marker_color=['blue', 'green', 'orange', 'purple'],
+                hovertemplate='<b>%{x}-index</b><br>Valor: %{y:.2f}<extra></extra>'
+            ))
+            fig_indices.update_layout(
+                title='Comparativa de Índices de Impacto',
+                xaxis_title='Índice',
+                yaxis_title='Valor',
+                height=400
+            )
+            st.plotly_chart(fig_indices, width='stretch')
+            st.caption("Nota: El índice M está multiplicado por 10 para mejor visualización")
+            
             # Información sobre las métricas
             with st.expander("Información sobre las métricas de impacto"):
+                # Calcular años de carrera para la explicación del M-index
+                try:
+                    years_data = pd.to_numeric(df_filtered[year_col], errors='coerce').dropna()
+                    career_years = years_data.max() - years_data.min() + 1 if len(years_data) > 0 else 0
+                except:
+                    career_years = 0
+                
                 st.markdown(f"""
                 **Índice H**: Un investigador tiene índice h si h de sus publicaciones tienen al menos h citaciones cada una.
                 - Mide tanto productividad como impacto
                 - Un h-index de {h_index} significa que hay {h_index} artículos con al menos {h_index} citaciones
+                - Limita la atención solo a los artículos del "core" del índice H
+                
+                **Índice G**: Complementa al H-index, considera el impacto acumulado.
+                - Mayor número g tal que los g artículos más citados tienen al menos g² citaciones en total
+                - Un g-index de {g_index:.0f} significa que los {g_index:.0f} artículos más citados tienen al menos {g_index:.0f}² = {g_index*g_index:.0f} citaciones acumuladas
+                - Da más peso a los artículos altamente citados que el H-index
+                - Generalmente g-index ≥ h-index
+                
+                **Índice E**: Mide el exceso de citaciones sobre el H-index.
+                - Se calcula como: E-index = √(suma de citaciones del core H - h²)
+                - Un E-index de {e_index:.2f} indica que hay un exceso de {e_index:.2f}² = {e_index*e_index:.2f} citaciones sobre el mínimo requerido para el H-index
+                - Complementa el H-index mostrando la intensidad de las citaciones en el núcleo
+                - Cuanto mayor sea el E-index, mayor es la concentración de citaciones en los artículos del core H
+                
+                **Índice M**: H-index normalizado por años de actividad (también conocido como m-quotient).
+                - Se calcula como: M-index = H-index / años de carrera
+                - Un M-index de {m_index:.3f} indica un H-index de {h_index} distribuido a lo largo de {career_years} años de actividad
+                - Permite comparar investigadores con diferentes longitudes de carrera
+                - Útil para identificar investigadores jóvenes con alto impacto potencial
+                - Un M-index > 1 indica alta productividad e impacto sostenido
                 
                 **Factor de Impacto**: Promedio de citaciones recibidas por artículos publicados en los últimos 2 años.
                 - Se calcula: (Citaciones a artículos de últimos 2 años) / (Número de artículos publicados en esos 2 años)
                 - Indica el impacto promedio reciente de las publicaciones
+                - Mide la frescura y relevancia actual del trabajo
                 
                 **Índice i10**: Número de publicaciones con al menos 10 citaciones.
                 - Útil para identificar trabajos con impacto significativo
+                - Mide la consistencia del impacto, no solo los trabajos más destacados
+                - Complementa al H-index dando una visión del número de trabajos de alto impacto
+                
+                **Comparativa de Índices**:
+                - **H-index**: Equilibrio entre productividad e impacto, pero limita la atención al core
+                - **G-index**: Mayor sensibilidad a los artículos altamente citados, considera impacto acumulado
+                - **E-index**: Mide la intensidad de las citaciones en el núcleo del H-index
+                - **M-index**: Normaliza el H-index por tiempo, permite comparaciones justas entre investigadores
                 """)
             
             # Top artículos más citados
@@ -838,7 +1046,184 @@ with tab9:
                 )
                 st.plotly_chart(fig_h, width='stretch')
     
+    # Análisis de colaboración mejorado
+    st.markdown("---")
+    st.subheader("Análisis de Colaboración Avanzado")
+    
+    if author_col:
+        # Coeficiente de colaboración
+        cc = calculate_collaboration_coefficient(df_filtered, author_col)
+        
+        # Evolución temporal del CC
+        cc_by_year = {}
+        if year_col:
+            for year in sorted(df_filtered[year_col].dropna().unique()):
+                df_year = df_filtered[df_filtered[year_col] == year]
+                cc_year = calculate_collaboration_coefficient(df_year, author_col)
+                cc_by_year[year] = cc_year
+        
+        # Índice de colaboración internacional
+        ici = calculate_international_collaboration_index(df_filtered, aff_col) if aff_col else 0.0
+        
+        # Promedio de autores por publicación
+        avg_authors_per_pub = len(all_authors) / len(df_filtered) if len(df_filtered) > 0 else 0
+        
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Coeficiente de Colaboración (CC)", f"{cc:.2%}",
+                   help="Proporción de publicaciones colaborativas (más de 1 autor)")
+        col2.metric("Índice Colaboración Internacional (ICI)", f"{ici:.2%}",
+                   help="Proporción de publicaciones con múltiples países")
+        col3.metric("Promedio Autores/Pub", f"{avg_authors_per_pub:.2f}")
+        col4.metric("Índice Colaboración", f"{collab_index:.2f}")
+        
+        # Evolución temporal del CC
+        if cc_by_year and len(cc_by_year) > 1:
+            st.markdown("#### Evolución Temporal del Coeficiente de Colaboración")
+            cc_df = pd.DataFrame(list(cc_by_year.items()), columns=['Año', 'CC'])
+            cc_df = cc_df.sort_values('Año')
+            
+            fig_cc = go.Figure()
+            fig_cc.add_trace(go.Scatter(
+                x=cc_df['Año'],
+                y=cc_df['CC'] * 100,
+                mode='lines+markers',
+                name='CC (%)',
+                marker_color='teal',
+                hovertemplate='Año: %{x}<br>CC: %{y:.2f}%<extra></extra>'
+            ))
+            fig_cc.update_layout(
+                title='Evolución del Coeficiente de Colaboración',
+                xaxis_title='Año',
+                yaxis_title='Coeficiente de Colaboración (%)',
+                height=400
+            )
+            st.plotly_chart(fig_cc, width='stretch')
+    
+    # Índice de Price
+    st.markdown("---")
+    st.subheader("Índice de Price (Frescura de la Literatura)")
+    
+    price_index_5 = calculate_price_index(df_filtered, year_col, years=5)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Índice de Price (5 años)", f"{price_index_5:.2f}%",
+                 help="Porcentaje de publicaciones en los últimos 5 años")
+    
+    with col2:
+        if price_index_5 >= 50:
+            st.success("📈 Alta frescura: más del 50% de las publicaciones son recientes")
+        elif price_index_5 >= 30:
+            st.info("📊 Frescura moderada: entre 30-50% de publicaciones recientes")
+        else:
+            st.warning("📉 Baja frescura: menos del 30% de publicaciones recientes")
+    
+    # Análisis de acceso abierto
+    if oa_col:
+        st.markdown("---")
+        st.subheader("Análisis de Acceso Abierto")
+        
+        # Distribución OA vs No-OA
+        oa_counts = df_filtered[oa_col].value_counts()
+        
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            fig_oa = go.Figure(data=[go.Pie(
+                labels=oa_counts.index,
+                values=oa_counts.values,
+                hovertemplate='<b>%{label}</b><br>Publicaciones: %{value}<br>Porcentaje: %{percent}<extra></extra>'
+            )])
+            fig_oa.update_layout(title='Distribución OA vs No-OA', height=400)
+            st.plotly_chart(fig_oa, width='stretch')
+        
+        with col2:
+            if citations_col:
+                # Comparativa de impacto: citaciones promedio OA vs No-OA
+                oa_with_cites = df_filtered[df_filtered[oa_col].notna()].copy()
+                oa_with_cites['citations_num'] = pd.to_numeric(oa_with_cites[citations_col], errors='coerce')
+                
+                oa_citations = {}
+                for oa_type in oa_counts.index:
+                    oa_pubs = oa_with_cites[oa_with_cites[oa_col] == oa_type]
+                    avg_cites = oa_pubs['citations_num'].mean() if len(oa_pubs) > 0 else 0
+                    oa_citations[oa_type] = avg_cites
+                
+                if len(oa_citations) >= 2:
+                    oa_types = list(oa_citations.keys())
+                    avg_cites_list = [oa_citations[t] for t in oa_types]
+                    
+                    fig_oa_impact = go.Figure(go.Bar(
+                        x=oa_types,
+                        y=avg_cites_list,
+                        marker_color=['green', 'blue'],
+                        hovertemplate='<b>%{x}</b><br>Promedio citaciones: %{y:.2f}<extra></extra>'
+                    ))
+                    fig_oa_impact.update_layout(
+                        title='Impacto Promedio: OA vs No-OA',
+                        xaxis_title='Tipo de Acceso',
+                        yaxis_title='Promedio de Citaciones',
+                        height=350
+                    )
+                    st.plotly_chart(fig_oa_impact, width='stretch')
+                    
+                    # Diferencia porcentual
+                    if len(avg_cites_list) == 2 and avg_cites_list[1] > 0:
+                        diff_pct = ((avg_cites_list[0] - avg_cites_list[1]) / avg_cites_list[1]) * 100
+                        st.metric("Diferencia porcentual", f"{diff_pct:+.1f}%")
+    
+    # Análisis de financiamiento
+    if funding_col:
+        st.markdown("---")
+        st.subheader("Análisis de Financiamiento")
+        
+        # Artículos con/sin financiamiento
+        funded = df_filtered[funding_col].notna() & (df_filtered[funding_col].astype(str).str.lower() != 'nan')
+        funded_count = funded.sum()
+        not_funded_count = len(df_filtered) - funded_count
+        
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            funding_counts = pd.Series({
+                'Con Financiamiento': funded_count,
+                'Sin Financiamiento': not_funded_count
+            })
+            
+            fig_fund = go.Figure(data=[go.Pie(
+                labels=funding_counts.index,
+                values=funding_counts.values,
+                hovertemplate='<b>%{label}</b><br>Publicaciones: %{value}<br>Porcentaje: %{percent}<extra></extra>'
+            )])
+            fig_fund.update_layout(title='Distribución de Financiamiento', height=400)
+            st.plotly_chart(fig_fund, width='stretch')
+        
+        with col2:
+            if citations_col:
+                # Comparativa de impacto
+                df_funding = df_filtered.copy()
+                df_funding['citations_num'] = pd.to_numeric(df_funding[citations_col], errors='coerce')
+                df_funding['Funded'] = funded
+                
+                funded_cites = df_funding[df_funding['Funded']]['citations_num'].mean()
+                not_funded_cites = df_funding[~df_funding['Funded']]['citations_num'].mean()
+                
+                fig_fund_impact = go.Figure(go.Bar(
+                    x=['Con Financiamiento', 'Sin Financiamiento'],
+                    y=[funded_cites, not_funded_cites],
+                    marker_color=['orange', 'gray'],
+                    hovertemplate='<b>%{x}</b><br>Promedio citaciones: %{y:.2f}<extra></extra>'
+                ))
+                fig_fund_impact.update_layout(
+                    title='Impacto: Financiado vs No Financiado',
+                    xaxis_title='Tipo',
+                    yaxis_title='Promedio de Citaciones',
+                    height=350
+                )
+                st.plotly_chart(fig_fund_impact, width='stretch')
+    
     # Índices de productividad
+    st.markdown("---")
     st.subheader("Ley de Lotka (Distribución de Productividad)")
     if counter_authors:
         productivity_dist = Counter(counter_authors.values())
@@ -974,6 +1359,52 @@ with tab10:
         )
         st.plotly_chart(fig_heat_kw, width='stretch')
     
+    # Velocidad de citación temporal
+    if citations_col and year_col:
+        st.markdown("---")
+        st.subheader("Velocidad de Citación Temporal")
+        
+        # Calcular promedio de citaciones por año (últimos 10 años)
+        df_cites_temporal = df_filtered.copy()
+        df_cites_temporal['citations_num'] = pd.to_numeric(df_cites_temporal[citations_col], errors='coerce')
+        df_cites_temporal['year_num'] = pd.to_numeric(df_cites_temporal[year_col], errors='coerce')
+        
+        # Filtrar últimos 10 años
+        if len(df_cites_temporal[df_cites_temporal['year_num'].notna()]) > 0:
+            max_year = df_cites_temporal['year_num'].max()
+            min_year = max(max_year - 9, df_cites_temporal['year_num'].min())
+            df_recent = df_cites_temporal[(df_cites_temporal['year_num'] >= min_year) & 
+                                         (df_cites_temporal['year_num'] <= max_year)]
+            
+            # Agrupar por año y calcular promedio de citaciones
+            citations_by_year = df_recent.groupby('year_num')['citations_num'].agg(['mean', 'sum', 'count']).reset_index()
+            citations_by_year.columns = ['Año', 'Promedio Citaciones', 'Total Citaciones', 'Número Publicaciones']
+            citations_by_year = citations_by_year.sort_values('Año')
+            
+            if len(citations_by_year) > 0:
+                # Visualización de tendencia temporal
+                fig_cite_speed = go.Figure()
+                fig_cite_speed.add_trace(go.Scatter(
+                    x=citations_by_year['Año'],
+                    y=citations_by_year['Promedio Citaciones'],
+                    mode='lines+markers',
+                    name='Promedio de Citaciones',
+                    marker_color='blue',
+                    hovertemplate='<b>Año %{x}</b><br>Promedio: %{y:.2f} citaciones<br>Total: %{customdata[0]}<br>Publicaciones: %{customdata[1]}<extra></extra>',
+                    customdata=citations_by_year[['Total Citaciones', 'Número Publicaciones']].values
+                ))
+                fig_cite_speed.update_layout(
+                    title='Promedio de Citaciones por Año (Últimos 10 años)',
+                    xaxis_title='Año',
+                    yaxis_title='Promedio de Citaciones',
+                    height=400
+                )
+                st.plotly_chart(fig_cite_speed, width='stretch')
+                
+                # Tabla de datos
+                with st.expander("Ver datos detallados de velocidad de citación"):
+                    st.dataframe(citations_by_year, use_container_width=True)
+    
     # Predicción simple de publicaciones
     if year_col and len(pubs_per_year) >= 3:
         st.subheader("Proyección de Publicaciones")
@@ -985,8 +1416,8 @@ with tab10:
         z = np.polyfit(years_num, pubs_values, 1)
         p = np.poly1d(z)
         
-        # Proyectar 3 años
-        future_years = np.arange(years_num[-1] + 1, years_num[-1] + 4)
+        # Proyectar 20 años
+        future_years = np.arange(years_num[-1] + 1, years_num[-1] + 21)
         future_pubs = p(future_years)
         
         fig_pred = go.Figure()
@@ -1016,8 +1447,133 @@ with tab10:
         st.plotly_chart(fig_pred, width='stretch')
         
         st.info(f"Tendencia: ~{z[0]:.1f} publicaciones adicionales por año")
+        
+        # Métricas de proyección a 10, 15 y 20 años
+        last_year_pubs = pubs_values[-1]
+        year_10_proj = p(years_num[-1] + 10)
+        year_15_proj = p(years_num[-1] + 15)
+        year_20_proj = p(years_num[-1] + 20)
+        
+        diff_10 = year_10_proj - last_year_pubs
+        diff_15 = year_15_proj - last_year_pubs
+        diff_20 = year_20_proj - last_year_pubs
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            delta_10 = f"+{diff_10:.0f}" if diff_10 > 0 else f"{diff_10:.0f}" if diff_10 < 0 else "0"
+            direction_10 = "Sube" if diff_10 > 0 else "Baja" if diff_10 < 0 else "Igual"
+            col1.metric(
+                f"Proyección a 10 años ({years_num[-1] + 10})",
+                f"{year_10_proj:.0f} publicaciones",
+                delta=f"{delta_10} ({direction_10})",
+                delta_color="normal" if diff_10 > 0 else "inverse" if diff_10 < 0 else "off"
+            )
+        
+        with col2:
+            delta_15 = f"+{diff_15:.0f}" if diff_15 > 0 else f"{diff_15:.0f}" if diff_15 < 0 else "0"
+            direction_15 = "Sube" if diff_15 > 0 else "Baja" if diff_15 < 0 else "Igual"
+            col2.metric(
+                f"Proyección a 15 años ({years_num[-1] + 15})",
+                f"{year_15_proj:.0f} publicaciones",
+                delta=f"{delta_15} ({direction_15})",
+                delta_color="normal" if diff_15 > 0 else "inverse" if diff_15 < 0 else "off"
+            )
+        
+        with col3:
+            delta_20 = f"+{diff_20:.0f}" if diff_20 > 0 else f"{diff_20:.0f}" if diff_20 < 0 else "0"
+            direction_20 = "Sube" if diff_20 > 0 else "Baja" if diff_20 < 0 else "Igual"
+            col3.metric(
+                f"Proyección a 20 años ({years_num[-1] + 20})",
+                f"{year_20_proj:.0f} publicaciones",
+                delta=f"{delta_20} ({direction_20})",
+                delta_color="normal" if diff_20 > 0 else "inverse" if diff_20 < 0 else "off"
+            )
+    
+    # Análisis de contenido (Abstracts)
+    if abstract_col:
+        st.markdown("---")
+        st.subheader("Análisis de Contenido (Abstracts)")
+        
+        # Obtener abstracts válidos
+        abstracts = df_filtered[abstract_col].dropna().astype(str)
+        abstracts = abstracts[abstracts.str.lower() != 'nan']
+        
+        if len(abstracts) > 0:
+            # Longitud promedio de abstracts
+            abstract_lengths = abstracts.str.split().str.len()
+            avg_length = abstract_lengths.mean()
+            median_length = abstract_lengths.median()
+            
+            col1, col2 = st.columns(2)
+            col1.metric("Longitud Promedio de Abstracts", f"{avg_length:.0f} palabras")
+            col2.metric("Mediana de Palabras", f"{median_length:.0f} palabras")
+            
+            # Palabras más frecuentes en abstracts (Top 30)
+            st.markdown("#### Palabras Más Frecuentes en Abstracts (Top 30)")
+            
+            # Unir todos los abstracts
+            all_text = ' '.join(abstracts.str.lower())
+            
+            # Limpiar y tokenizar
+            # Eliminar puntuación y números, mantener solo palabras
+            words = re.findall(r'\b[a-záéíóúñ]{3,}\b', all_text)
+            
+            # Filtrar palabras comunes (stopwords en español e inglés)
+            stopwords = {
+                'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+                'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas', 'de', 'del', 'en', 'con', 'por',
+                'para', 'que', 'este', 'esta', 'estos', 'estas', 'ese', 'esa', 'esos', 'esas', 'aquel',
+                'aquella', 'aquellos', 'aquellas', 'the', 'this', 'that', 'these', 'those', 'is', 'are',
+                'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will',
+                'would', 'could', 'should', 'may', 'might', 'must', 'can', 'not', 'from', 'as', 'its',
+                'it', 'which', 'who', 'when', 'where', 'what', 'why', 'how', 'all', 'each', 'every',
+                'both', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'only', 'own',
+                'same', 'so', 'than', 'too', 'very', 's', 't', 'can', 'will', 'just', 'don', 'should',
+                'now', 'use', 'also', 'new', 'paper', 'study', 'results', 'research', 'method', 'data',
+                'analysis', 'article', 'abstract', 'introduction', 'conclusion', 'present', 'show',
+                'propose', 'present', 'presented', 'proposed', 'shown', 'based', 'using', 'used'
+            }
+            
+            words_filtered = [w for w in words if w not in stopwords and len(w) > 3]
+            
+            if words_filtered:
+                word_counter = Counter(words_filtered)
+                top_words = word_counter.most_common(30)
+                
+                # Visualización
+                words_df = pd.DataFrame(top_words, columns=['Palabra', 'Frecuencia'])
+                
+                fig_words = go.Figure(go.Bar(
+                    x=words_df['Frecuencia'][::-1],
+                    y=words_df['Palabra'][::-1],
+                    orientation='h',
+                    marker_color='steelblue',
+                    hovertemplate='<b>%{y}</b><br>Frecuencia: %{x}<extra></extra>'
+                ))
+                fig_words.update_layout(
+                    title='Top 30 Palabras Más Frecuentes en Abstracts',
+                    xaxis_title='Frecuencia',
+                    yaxis_title='Palabra',
+                    height=600,
+                    yaxis={'categoryorder': 'total ascending'}
+                )
+                st.plotly_chart(fig_words, width='stretch')
+                
+                # Tabla de palabras
+                with st.expander("Ver tabla completa de palabras (Top 30)"):
+                    st.dataframe(words_df, use_container_width=True)
+                
+                # Análisis de texto básico
+                st.markdown("#### Análisis de Texto Básico")
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Total Abstracts", len(abstracts))
+                col2.metric("Palabras Únicas", len(set(words_filtered)))
+                col3.metric("Total Palabras", len(words_filtered))
+                col4.metric("Palabras/Abstract Promedio", f"{len(words_filtered)/len(abstracts):.0f}")
     
     # Insights automáticos
+    st.markdown("---")
     st.subheader("Insights Estratégicos")
     
     insights = []

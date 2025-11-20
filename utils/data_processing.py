@@ -72,6 +72,10 @@ def detect_columns(df):
     citations_col = next((c for c in df.columns if "cited" in c.lower() or "citation" in c.lower()), None)
     language_col = next((c for c in df.columns if "language" in c.lower()), None)
     funding_col = next((c for c in df.columns if "funding" in c.lower() or "sponsor" in c.lower()), None)
+    abstract_col = next((c for c in df.columns if "abstract" in c.lower()), None)
+    publisher_col = next((c for c in df.columns if "publisher" in c.lower()), None)
+    conference_col = next((c for c in df.columns if "conference" in c.lower() or "proceeding" in c.lower()), None)
+    oa_col = next((c for c in df.columns if "open.access" in c.lower() or "open access" in c.lower() or "oa" == c.lower()), None)
     
     return {
         'author_col': author_col,
@@ -83,7 +87,11 @@ def detect_columns(df):
         'doctype_col': doctype_col,
         'citations_col': citations_col,
         'language_col': language_col,
-        'funding_col': funding_col
+        'funding_col': funding_col,
+        'abstract_col': abstract_col,
+        'publisher_col': publisher_col,
+        'conference_col': conference_col,
+        'oa_col': oa_col
     }
 
 
