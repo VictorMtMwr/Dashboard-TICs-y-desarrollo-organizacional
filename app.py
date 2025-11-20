@@ -1,4 +1,6 @@
-
+"""
+Dashboard Bibliométrico - Aplicación principal de Streamlit
+"""
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -14,268 +16,82 @@ import os
 import multiprocessing as mp
 import numpy as np
 from collections import Counter, defaultdict
-import math
 import time
-import re
 from itertools import combinations
-from sklearn.preprocessing import StandardScaler
+
+# Importar módulos locales
+import config
+from utils.normalizers import (
+    normalize_author_name,
+    normalize_keyword,
+    normalize_country,
+    country_to_iso3,
+    normalize_institution,
+    normalize_source,
+    split_authors,
+    split_keywords,
+    extract_countries_from_affiliation,
+    extract_institutions_from_affiliation
+)
+from utils.data_processing import (
+    process_chunk_authors,
+    process_chunk_keywords,
+    process_chunk_countries,
+    process_chunk_institutions,
+    parallel_map_series,
+    detect_columns,
+    load_data
+)
+from utils.metrics import (
+    calculate_h_index,
+    calculate_impact_factor,
+    calculate_i10_index,
+    get_citation_percentiles,
+    get_top_h_relevant_articles
+)
 
 # --------------------------
 # Configuración Streamlit
 # --------------------------
-st.set_page_config(page_title="Dashboard", layout="wide")
-st.title("Analítica Bibliométrica de TICs y Desarrollo Organizacional")
-st.markdown("**Análisis:** ¿Cómo las TICs median el desarrollo organizacional?")
-st.markdown("Versión completa con análisis avanzados y predictivos")
+st.set_page_config(page_title=config.PAGE_TITLE, layout=config.PAGE_LAYOUT)
+st.title(config.MAIN_TITLE)
+st.markdown(config.SUBTITLE)
+st.markdown(config.DESCRIPTION)
 
 # --------------------------
-# Parámetros configurables
+# Parámetros configurables (importados de config)
 # --------------------------
-CPU_USAGE_RATIO = 0.75
-MAX_NETWORK_NODES = 100
-MIN_EDGE_WEIGHT = 2
-TOP_KEYWORDS = 50
-TOP_AUTHORS = 20
-TOP_COUNTRIES = 20
-TOP_INSTITUTIONS = 30
-TOP_SOURCES = 20
-
-# --------------------------
-# Funciones de normalización
-# --------------------------
-def normalize_author_name(name):
-    if not name or pd.isna(name):
-        return None
-    name = str(name).strip()
-    name = re.sub(r'\.(?=\s|$)', '', name)
-    name = re.sub(r'\s+', ' ', name)
-    name = name.title()
-    return name if name else None
-
-def normalize_keyword(keyword):
-    if not keyword or pd.isna(keyword):
-        return None
-    kw = str(keyword).strip().lower()
-    kw = re.sub(r'^[^\w]+|[^\w]+$', '', kw)
-    kw = re.sub(r'[-\s]+', ' ', kw)
-    return kw if kw else None
-
-def normalize_country(country):
-    if not country or pd.isna(country):
-        return None
-    country = str(country).strip().title()
-    country_map = {
-        'Usa': 'United States', 'United States Of America': 'United States',
-        'U.S.A.': 'United States', 'U.S.': 'United States',
-        'Uk': 'United Kingdom', 'U.K.': 'United Kingdom',
-        'England': 'United Kingdom', 'Scotland': 'United Kingdom',
-        'Wales': 'United Kingdom', 'Prc': 'China',
-        "People'S Republic Of China": 'China', 'Peoples R China': 'China',
-        'Korea': 'South Korea', 'Republic Of Korea': 'South Korea',
-        'Russian Federation': 'Russia'
-    }
-    return country_map.get(country, country)
-
-def country_to_iso3(country_name):
-    """Convierte nombre de país a código ISO-3."""
-    if not country_name:
-        return None
-    
-    # Mapeo básico de países comunes a códigos ISO-3
-    iso3_map = {
-        'United States': 'USA',
-        'United Kingdom': 'GBR',
-        'China': 'CHN',
-        'Germany': 'DEU',
-        'France': 'FRA',
-        'Italy': 'ITA',
-        'Spain': 'ESP',
-        'Canada': 'CAN',
-        'Australia': 'AUS',
-        'Japan': 'JPN',
-        'South Korea': 'KOR',
-        'Brazil': 'BRA',
-        'India': 'IND',
-        'Russia': 'RUS',
-        'Netherlands': 'NLD',
-        'Sweden': 'SWE',
-        'Switzerland': 'CHE',
-        'Belgium': 'BEL',
-        'Poland': 'POL',
-        'Portugal': 'PRT',
-        'Turkey': 'TUR',
-        'Mexico': 'MEX',
-        'Argentina': 'ARG',
-        'Chile': 'CHL',
-        'Colombia': 'COL',
-        'Peru': 'PER',
-        'Venezuela': 'VEN',
-        'Ecuador': 'ECU',
-        'Uruguay': 'URY',
-        'Paraguay': 'PRY',
-        'Bolivia': 'BOL',
-        'South Africa': 'ZAF',
-        'Egypt': 'EGY',
-        'Nigeria': 'NGA',
-        'Kenya': 'KEN',
-        'Saudi Arabia': 'SAU',
-        'United Arab Emirates': 'ARE',
-        'Israel': 'ISR',
-        'Iran': 'IRN',
-        'Pakistan': 'PAK',
-        'Bangladesh': 'BGD',
-        'Thailand': 'THA',
-        'Malaysia': 'MYS',
-        'Singapore': 'SGP',
-        'Indonesia': 'IDN',
-        'Philippines': 'PHL',
-        'Vietnam': 'VNM',
-        'New Zealand': 'NZL',
-        'Norway': 'NOR',
-        'Denmark': 'DNK',
-        'Finland': 'FIN',
-        'Ireland': 'IRL',
-        'Austria': 'AUT',
-        'Czech Republic': 'CZE',
-        'Greece': 'GRC',
-        'Romania': 'ROU',
-        'Hungary': 'HUN'
-    }
-    
-    # Normalizar el nombre del país primero
-    normalized = normalize_country(country_name)
-    
-    # Retornar el código ISO-3 o el nombre original si no se encuentra
-    return iso3_map.get(normalized, normalized)
-
-def normalize_institution(affiliation):
-    if not affiliation or pd.isna(affiliation):
-        return None
-    parts = str(affiliation).split(',')
-    if not parts:
-        return None
-    inst = parts[0].strip()
-    inst = re.sub(r'\([^)]*\)', '', inst)
-    inst = re.sub(r'[0-9]', '', inst)
-    inst = re.sub(r'\s+', ' ', inst).strip()
-    inst = inst.replace('Univ ', 'University ')
-    inst = inst.replace('Inst ', 'Institute ')
-    return inst.title() if inst and len(inst) > 3 else None
-
-def normalize_source(source):
-    if not source or pd.isna(source):
-        return None
-    source = str(source).strip()
-    source = re.sub(r'\s+', ' ', source)
-    return source.title() if source else None
-
-# --------------------------
-# Utilidades
-# --------------------------
-def split_authors(text):
-    if not text or pd.isna(text):
-        return []
-    separators = [",", ";", " and "]
-    s = str(text)
-    for sep in separators:
-        s = s.replace(sep, "|")
-    parts = [normalize_author_name(p) for p in s.split("|") if p.strip()]
-    return [p for p in parts if p]
-
-def split_keywords(text):
-    if not text or pd.isna(text):
-        return []
-    parts = [normalize_keyword(p) for p in str(text).replace(";", ",").split(",") if p.strip()]
-    return [p for p in parts if p]
-
-def extract_countries_from_affiliation(text):
-    if not text or pd.isna(text):
-        return []
-    parts = [p.strip() for p in str(text).split(";") if p.strip()]
-    countries = []
-    for p in parts:
-        toks = p.split(",")
-        country_candidate = toks[-1].strip()
-        if len(country_candidate) > 1 and not any(ch.isdigit() for ch in country_candidate):
-            normalized = normalize_country(country_candidate)
-            if normalized:
-                countries.append(normalized)
-    return list(dict.fromkeys(countries))
-
-def extract_institutions_from_affiliation(text):
-    if not text or pd.isna(text):
-        return []
-    parts = [p.strip() for p in str(text).split(";") if p.strip()]
-    institutions = []
-    for p in parts:
-        inst = normalize_institution(p)
-        if inst:
-            institutions.append(inst)
-    return list(dict.fromkeys(institutions))
-
-# --------------------------
-# Paralelización
-# --------------------------
-def process_chunk_authors(series_chunk):
-    result = []
-    for val in series_chunk:
-        result.extend(split_authors(val))
-    return result
-
-def process_chunk_keywords(series_chunk):
-    result = []
-    for val in series_chunk:
-        result.extend(split_keywords(val))
-    return result
-
-def process_chunk_countries(series_chunk):
-    result = []
-    for val in series_chunk:
-        result.extend(extract_countries_from_affiliation(val))
-    return result
-
-def process_chunk_institutions(series_chunk):
-    result = []
-    for val in series_chunk:
-        result.extend(extract_institutions_from_affiliation(val))
-    return result
-
-def parallel_map_series(series, worker_func, n_cores):
-    series = series.fillna("").astype(str)
-    n = len(series)
-    if n == 0:
-        return []
-    chunk_sizes = int(math.ceil(n / n_cores))
-    chunks = [series[i:i+chunk_sizes].tolist() for i in range(0, n, chunk_sizes)]
-    with mp.Pool(processes=n_cores) as pool:
-        results = pool.map(worker_func, chunks)
-    flat = [item for sub in results for item in sub]
-    return flat
+CPU_USAGE_RATIO = config.CPU_USAGE_RATIO
+MAX_NETWORK_NODES = config.MAX_NETWORK_NODES
+MIN_EDGE_WEIGHT = config.MIN_EDGE_WEIGHT
+TOP_KEYWORDS = config.TOP_KEYWORDS
+TOP_AUTHORS = config.TOP_AUTHORS
+TOP_COUNTRIES = config.TOP_COUNTRIES
+TOP_INSTITUTIONS = config.TOP_INSTITUTIONS
+TOP_SOURCES = config.TOP_SOURCES
 
 # --------------------------
 # Cargar CSV
 # --------------------------
-RUTA_CSV = "data.csv"
-try:
-    df = pd.read_csv(RUTA_CSV, dtype=str)
-    st.success(f"Archivo '{RUTA_CSV}' cargado correctamente con {len(df)} registros.")
-except FileNotFoundError:
-    st.error(f"No se encontró el archivo '{RUTA_CSV}'.")
+df, error = load_data(config.RUTA_CSV)
+if error:
+    st.error(error)
     st.stop()
-
-df.columns = [c.strip() for c in df.columns]
+else:
+    st.success(f"Archivo '{config.RUTA_CSV}' cargado correctamente con {len(df)} registros.")
 
 # Detectar columnas
-author_full_col = "Author full names" if "Author full names" in df.columns else None
-author_col = author_full_col or next((c for c in df.columns if c.lower().startswith("authors")), None)
-keywords_cols = [c for c in df.columns if "keyword" in c.lower()]
-aff_col = next((c for c in df.columns if "affil" in c.lower()), None)
-year_col = next((c for c in df.columns if c.lower() == "year"), None)
-source_col = next((c for c in df.columns if "source" in c.lower() or "journal" in c.lower()), None)
-doctype_col = next((c for c in df.columns if "document type" in c.lower() or "type" in c.lower()), None)
-citations_col = next((c for c in df.columns if "cited" in c.lower() or "citation" in c.lower()), None)
-language_col = next((c for c in df.columns if "language" in c.lower()), None)
-funding_col = next((c for c in df.columns if "funding" in c.lower() or "sponsor" in c.lower()), None)
+columns_info = detect_columns(df)
+author_col = columns_info['author_col']
+author_full_col = columns_info['author_full_col']
+keywords_cols = columns_info['keywords_cols']
+aff_col = columns_info['aff_col']
+year_col = columns_info['year_col']
+source_col = columns_info['source_col']
+doctype_col = columns_info['doctype_col']
+citations_col = columns_info['citations_col']
+language_col = columns_info['language_col']
+funding_col = columns_info['funding_col']
 
 with st.expander("Columnas detectadas en el CSV"):
     st.write({
@@ -904,29 +720,11 @@ with tab9:
         citations_data = df_filtered['citations_num'].dropna()
         
         if len(citations_data) > 0:
-            # Calcular Índice H
-            citations_sorted = sorted(citations_data.values, reverse=True)
-            h_index = 0
-            for i, cites in enumerate(citations_sorted, 1):
-                if cites >= i:
-                    h_index = i
-                else:
-                    break
-            
-            # Calcular Factor de Impacto (últimos 2 años si hay datos de año)
-            impact_factor = 0
-            if year_col:
-                current_year = int(max(df_filtered[year_col].dropna()))
-                recent_years = [str(current_year), str(current_year - 1)]
-                
-                # Publicaciones en últimos 2 años
-                recent_pubs = df_filtered[df_filtered[year_col].isin(recent_years)]
-                num_recent_pubs = len(recent_pubs)
-                
-                # Citaciones recibidas por esas publicaciones
-                if num_recent_pubs > 0:
-                    recent_citations = pd.to_numeric(recent_pubs[citations_col], errors='coerce').sum()
-                    impact_factor = recent_citations / num_recent_pubs
+            # Calcular métricas bibliométricas usando módulos
+            h_index, citations_sorted = calculate_h_index(citations_data)
+            impact_factor = calculate_impact_factor(df_filtered, citations_col, year_col)
+            i10_index = calculate_i10_index(citations_data)
+            percentiles = get_citation_percentiles(citations_data)
             
             col1, col2, col3, col4, col5 = st.columns(5)
             col1.metric("Total Citaciones", f"{int(citations_data.sum())}")
@@ -935,21 +733,12 @@ with tab9:
             col4.metric("Promedio Citas/Pub", f"{citations_data.mean():.2f}")
             col5.metric("Máx Citaciones", f"{int(citations_data.max())}")
             
-            # Índice i10 (artículos con al menos 10 citaciones)
-            i10_index = len([c for c in citations_data if c >= 10])
-            
-            # Percentiles de citaciones
-            p25 = citations_data.quantile(0.25)
-            p50 = citations_data.quantile(0.50)
-            p75 = citations_data.quantile(0.75)
-            p90 = citations_data.quantile(0.90)
-            
             st.markdown("---")
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Índice i10", f"{i10_index}")
-            col2.metric("Mediana Citas", f"{p50:.0f}")
-            col3.metric("Percentil 75", f"{p75:.0f}")
-            col4.metric("Percentil 90", f"{p90:.0f}")
+            col2.metric("Mediana Citas", f"{percentiles['p50']:.0f}")
+            col3.metric("Percentil 75", f"{percentiles['p75']:.0f}")
+            col4.metric("Percentil 90", f"{percentiles['p90']:.0f}")
             
             # Información sobre las métricas
             with st.expander("Información sobre las métricas de impacto"):
@@ -974,69 +763,34 @@ with tab9:
                 top_cited.columns = ['Título', 'Autores', 'Año', 'Citaciones']
                 st.dataframe(top_cited, use_container_width=True)
             
-            # Top artículos más relevantes según el índice H
+            # Top artículos más relevantes según el índice H (usando módulo de métricas)
             st.subheader("Top 10 Artículos Más Relevantes Según el Índice H")
-            if title_col:
-                # Crear DataFrame con citaciones y filtrar los que tienen citaciones válidas
-                df_with_citations = df_filtered[df_filtered['citations_num'].notna()].copy()
-                df_with_citations = df_with_citations.sort_values('citations_num', ascending=False).reset_index(drop=True)
+            df_h_relevant, core_count = get_top_h_relevant_articles(
+                df_filtered, citations_col, year_col, author_col, h_index, top_n=10
+            )
+            
+            if df_h_relevant is not None and len(df_h_relevant) > 0:
+                st.dataframe(df_h_relevant, use_container_width=True)
                 
-                # Los artículos más relevantes según el índice H son aquellos que están en el "core" del índice H
-                # Estos son los primeros h artículos que tienen citaciones >= a su posición en el ranking
-                h_relevant_articles = []
-                for idx, row in df_with_citations.iterrows():
-                    position = idx + 1  # Posición 1-indexed (ranking por citaciones)
-                    citations = int(row['citations_num'])
-                    
-                    # Los artículos en el core del índice H son aquellos donde:
-                    # - Están en las primeras h posiciones (posición <= h_index)
-                    # - Tienen citaciones >= a su posición (condición del índice H)
-                    if position <= h_index and citations >= position:
-                        h_relevant_articles.append({
-                            'Posición en Índice H': position,
-                            'Título': row[title_col] if title_col else 'N/A',
-                            'Autores': row[author_col] if author_col else 'N/A',
-                            'Año': row[year_col] if year_col else 'N/A',
-                            'Citaciones': citations
-                        })
-                    # Si no tenemos suficientes del core, agregamos los más citados que siguen
-                    elif len(h_relevant_articles) < 10:
-                        h_relevant_articles.append({
-                            'Posición en Índice H': position,
-                            'Título': row[title_col] if title_col else 'N/A',
-                            'Autores': row[author_col] if author_col else 'N/A',
-                            'Año': row[year_col] if year_col else 'N/A',
-                            'Citaciones': citations
-                        })
-                    
-                    # Limitar a los top 10
-                    if len(h_relevant_articles) >= 10:
-                        break
-                
-                if h_relevant_articles:
-                    df_h_relevant = pd.DataFrame(h_relevant_articles)
-                    st.dataframe(df_h_relevant, use_container_width=True)
-                    
-                    # Contar cuántos están en el core del índice H
-                    core_count = sum(1 for art in h_relevant_articles if art['Posición en Índice H'] <= h_index)
-                    
-                    if core_count > 0:
-                        st.info(f"**{core_count} de estos artículos** están en el núcleo del índice H (h={h_index}). "
-                               f"Son aquellos que tienen al menos tantas citaciones como su posición en el ranking, "
-                               f"y contribuyen directamente al cálculo del índice H.")
-                    else:
-                        st.info(f"Estos son los **{len(h_relevant_articles)} artículos más citados** "
-                               f"ordenados por relevancia. El índice H actual es {h_index}.")
+                if core_count > 0:
+                    st.info(f"**{core_count} de estos artículos** están en el núcleo del índice H (h={h_index}). "
+                           f"Son aquellos que tienen al menos tantas citaciones como su posición en el ranking, "
+                           f"y contribuyen directamente al cálculo del índice H.")
                 else:
-                    st.warning("No se encontraron artículos con citaciones suficientes para el análisis del índice H.")
+                    st.info(f"Estos son los **{len(df_h_relevant)} artículos más citados** "
+                           f"ordenados por relevancia. El índice H actual es {h_index}.")
+            else:
+                st.warning("No se encontraron artículos con citaciones suficientes para el análisis del índice H.")
             
             # Distribución de citaciones
             col1, col2 = st.columns([2, 1])
             
             with col1:
                 fig_cit = go.Figure()
+                # Usar percentil 95 para filtrar outliers
+                percentile_95 = citations_data.quantile(0.95)
                 fig_cit.add_trace(go.Histogram(
-                    x=citations_data[citations_data <= citations_data.quantile(0.95)],
+                    x=citations_data[citations_data <= percentile_95],
                     nbinsx=30,
                     marker_color='indianred',
                     hovertemplate='Rango: %{x}<br>Publicaciones: %{y}<extra></extra>'
